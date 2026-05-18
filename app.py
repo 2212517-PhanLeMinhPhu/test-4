@@ -12,14 +12,14 @@ import io
 st.set_page_config(page_title="JSON Data Pro (Optimized with VPD)", layout="wide", page_icon="🌱")
 st.title("🌱 Công cụ Phân tích Dữ liệu Nông Nghiệp & Áp Suất VPD")
 
-# Đã cập nhật lại dải an toàn cho Nhiệt độ, Độ ẩm và thêm chuẩn VPD
+# Đã cập nhật dải thông số an toàn chuẩn để cây không bị quá cao / quá thấp
 KHOANG_TOI_UU = {
-    'TEMPKK': (15.0, 32.0),       
-    'HUMIKK': (50.0, 85.0),        
+    'TEMPKK': (15.0, 32.0),       # Giới hạn nhiệt độ không khí an toàn (15°C - 32°C)
+    'HUMIKK': (50.0, 85.0),       # Giới hạn độ ẩm không khí an toàn (50% - 85%)
     'SOIL_ASKK': (0.0, 200000.0),   
     'AS': (0.0, 200000.0),          
-    'NHIỆT ĐỘ': (15.0, 32.0),    
-    'ĐỘ ẨM': (50.0, 85.0),          
+    'NHIỆT ĐỘ': (15.0, 32.0),     # Giới hạn nhiệt độ an toàn (15°C - 32°C)
+    'ĐỘ ẨM': (50.0, 85.0),        # Giới hạn độ ẩm an toàn (50% - 85%)
     'PH': (0.0, 14.0),             
     'TBPH': (0.0, 14.0),         
     'EC': (0.0, 10000.0),          
@@ -27,10 +27,10 @@ KHOANG_TOI_UU = {
     'N': (0.0, 2000.0),        
     'P': (0.0, 2000.0),             
     'K': (0.0, 2000.0),
-    'VPD': (0.4, 1.6) # Khoảng tối ưu của chỉ số VPD từ 0.4 đến 1.6 kPa
+    'VPD': (0.4, 1.6)             # Khoảng áp suất VPD lý tưởng nhất cho cây (0.4 - 1.6 kPa)
 }
 
-# Tiền biên dịch Regex để tăng tốc xử lý vòng lặp (Cực kỳ quan trọng cho tốc độ)
+# Tiền biên dịch Regex để tăng tốc xử lý vòng lặp
 PATTERN_DATETIME = re.compile(r'(\d{2}-\d{2}-\d{2})/([-+]?\d*\.?\d+)')
 PATTERN_NUMBER = re.compile(r'[-+]?\d*\.?\d+')
 
@@ -122,9 +122,18 @@ def render_date_filter(min_date, max_date, key_prefix):
 
 @st.cache_data(show_spinner=False)
 def extract_sensor_data(df, selected_cols):
-    # Kiểm tra xem người dùng có chọn chỉ số ảo 'VPD' hay không
+    # Đánh dấu xem người dùng có tick chọn trường ảo 'VPD' hay không
     has_vpd = any(c.upper() == 'VPD' for c in selected_cols)
-    actual_cols = [c for c in selected_cols if c.upper() != 'VPD']
+    
+    # Chuẩn bị danh sách các cột thực tế cần quét qua hệ thống
+    cols_to_run = list(selected_cols)
+    if has_vpd:
+        t_col = next((c for c in df.columns if c.upper() in ['NHIỆT ĐỘ', 'TEMPKK']), None)
+        rh_col = next((c for c in df.columns if c.upper() in ['ĐỘ ẨM', 'HUMIKK']), None)
+        if t_col and t_col not in cols_to_run: cols_to_run.append(t_col)
+        if rh_col and rh_col not in cols_to_run: cols_to_run.append(rh_col)
+        
+    actual_cols = [c for c in cols_to_run if c.upper() != 'VPD']
     
     records = []
     cols_to_extract = ['_parsed_time'] + actual_cols
@@ -143,7 +152,7 @@ def extract_sensor_data(df, selected_cols):
             def process_val(v_str):
                 v = float(v_str)
                 if col_upper in ['PH', 'TBPH'] and v > 14: return v / 100.0
-                if col_upper in ['NHIỆT ĐỘ'] and v > 100: return v / 10.0
+                if col_upper in ['NHIỆT ĐỘ', 'TEMPKK'] and v > 100: return v / 10.0
                 return v
                 
             matches = PATTERN_DATETIME.findall(val)
@@ -161,41 +170,41 @@ def extract_sensor_data(df, selected_cols):
                         records.append({'TG': main_time, 'Giá trị': process_val(num_match.group()), 'Chỉ số': col_upper})
                     except Exception:
                         pass
-                    
+                        
+    if not records:
+        return pd.DataFrame(columns=['TG', 'Giá trị', 'Chỉ số'])
+        
     res_df = pd.DataFrame(records)
     
-    # --- LOGIC TÍNH TOÁN BIẾN ẢO VPD ---
+    # --- THUẬT TOÁN TỰ ĐỘNG TÍNH TOÁN ÁP SUẤT VPD ĐỒNG BỘ THEO THỜI GIAN ---
     if has_vpd:
-        t_col = next((c for c in df.columns if c.upper() in ['NHIỆT ĐỘ', 'TEMPKK']), None)
-        rh_col = next((c for c in df.columns if c.upper() in ['ĐỘ ẨM', 'HUMIKK']), None)
+        t_key = next((c.upper() for c in actual_cols if c.upper() in ['NHIỆT ĐỘ', 'TEMPKK']), None)
+        rh_key = next((c.upper() for c in actual_cols if c.upper() in ['ĐỘ ẨM', 'HUMIKK']), None)
         
-        if t_col and rh_col:
-            # Trích xuất dữ liệu gốc của cả Nhiệt độ và Độ ẩm để đồng bộ thời gian
-            needed_cols = list(set([t_col, rh_col]))
-            df_t_rh = extract_sensor_data(df, needed_cols)
+        if t_key and rh_key:
+            pivot_df = res_df[res_df['Chỉ số'].isin([t_key, rh_key])].pivot_table(
+                index='TG', columns='Chỉ số', values='Giá trị', aggfunc='mean'
+            ).reset_index()
             
-            if not df_t_rh.empty:
-                pivot_df = df_t_rh.pivot_table(index='TG', columns='Chỉ số', values='Giá trị', aggfunc='mean').reset_index()
-                t_key = t_col.upper()
-                rh_key = rh_col.upper()
+            if t_key in pivot_df.columns and rh_key in pivot_df.columns:
+                T = pivot_df[t_key]
+                RH = pivot_df[rh_key]
                 
-                if t_key in pivot_df.columns and rh_key in pivot_df.columns:
-                    T = pivot_df[t_key]
-                    RH = pivot_df[rh_key]
-                    
-                    # Công thức tính VPD (kPa)
-                    vp_sat = 0.61078 * np.exp((17.27 * T) / (T + 237.3))
-                    vpd_values = vp_sat * (1.0 - (RH / 100.0))
-                    
-                    vpd_df = pd.DataFrame({
-                        'TG': pivot_df['TG'],
-                        'Giá trị': vpd_values,
-                        'Chỉ số': 'VPD'
-                    }).dropna()
-                    
-                    res_df = pd.concat([res_df, vpd_df], ignore_index=True)
-                    
-    return res_df
+                # Công thức toán học tính Áp suất hụt (VPD - kPa) từ Nhiệt độ & Độ ẩm
+                vp_sat = 0.61078 * np.exp((17.27 * T) / (T + 237.3))
+                vpd_values = vp_sat * (1.0 - (RH / 100.0))
+                
+                vpd_df = pd.DataFrame({
+                    'TG': pivot_df['TG'],
+                    'Giá trị': vpd_values,
+                    'Chỉ số': 'VPD'
+                }).dropna()
+                
+                res_df = pd.concat([res_df, vpd_df], ignore_index=True)
+                
+    # Chỉ trả về đúng những chỉ số mà người dùng chủ động tick chọn trên giao diện
+    user_indices = [c.upper() for c in selected_cols]
+    return res_df[res_df['Chỉ số'].isin(user_indices)].reset_index(drop=True)
 
 def generate_chart(df, title, is_multi=False):
     num_points = len(df)
@@ -249,7 +258,7 @@ if uploaded_file is not None:
         exclude = [time_col, 'stt', 'tên khu', 'trạng thái', 'phương thức hoạt động', 'người điều khiển', '_parsed_time']
         numeric_options = [c for c in df.columns if c not in exclude and '_id' not in c]
 
-        # Sinh tự động trường ảo VPD nếu có đủ Nhiệt và Ẩm
+        # TỰ ĐỘNG SINH KHÓA ẢO VPD NẾU FILE CÓ ĐỦ NHIỆT ĐỘ & ĐỘ ẨM
         has_t = any(c.upper() in ['NHIỆT ĐỘ', 'TEMPKK'] for c in df.columns)
         has_rh = any(c.upper() in ['ĐỘ ẨM', 'HUMIKK'] for c in df.columns)
         if has_t and has_rh:
@@ -264,9 +273,6 @@ if uploaded_file is not None:
         st.markdown("---")
         tab1, tab2, tab3 = st.tabs(["🗂️ Bảng dữ liệu", "📈 Biểu đồ Đơn", "📊 Biểu đồ Lồng nhau"])
 
-        # ==========================================
-        # TAB 1: BẢNG DỮ LIỆU
-        # ==========================================
         with tab1:
             st.subheader("🌾 Bảng dữ liệu chi tiết")
             display_df = df.drop(columns=['_parsed_time'], errors='ignore').fillna("")
@@ -277,15 +283,12 @@ if uploaded_file is not None:
                 st.download_button("📥 Tải xuống CSV", data=csv, file_name='data_export.csv', mime='text/csv', use_container_width=True)
             st.dataframe(display_df, use_container_width=True)
 
-        # ==========================================
-        # TAB 2: BIỂU ĐỒ ĐƠN LẺ
-        # ==========================================
         with tab2:
             st.write("⚙️ Thiết lập biểu đồ đơn lẻ")
             col1, col2 = st.columns([1, 2])
             with col1:
                 start_d_2, end_d_2 = render_date_filter(min_d, max_d, "tab2")
-                filter_data_2 = st.checkbox("✅ Lọc Sạch Dữ Liệu (Bỏ nhiễu)", value=True, key="filter_tab2")
+                filter_data_2 = st.checkbox("✅ Lọc Sạch Dữ Liệu (Bỏ nhiễu theo ngưỡng an toàn)", value=True, key="filter_tab2")
 
             with col2:
                 st.write("Chọn chỉ số:")
@@ -307,6 +310,7 @@ if uploaded_file is not None:
                                 sub_df = chart_df[chart_df['Chỉ số'] == col.upper()]
                                 ten_chi_so = col.upper()
                                 
+                                # TỰ ĐỘNG LOẠI BỎ CÁC ĐIỂM DỮ LIỆU QUÁ CAO HOẶC QUÁ THẤP VƯỢT NGƯỠNG AN TOÀN
                                 if filter_data_2 and ten_chi_so in KHOANG_TOI_UU:
                                     min_val, max_val = KHOANG_TOI_UU[ten_chi_so]
                                     sub_df = sub_df[(sub_df['Giá trị'] >= min_val) & (sub_df['Giá trị'] <= max_val)]
@@ -321,7 +325,7 @@ if uploaded_file is not None:
                                 if days_diff > 2: rule = '1D'
                                 
                                 if rule: 
-                                    st.info(f"💡 Chỉ số {ten_chi_so} có quá nhiều dữ liệu ({pts_count} điểm). Hệ thống tự động gộp trung bình theo '{'Ngày' if rule=='1D' else 'Giờ'}' để biểu đồ mượt mà hơn.")
+                                    st.info(f"💡 Chỉ số {ten_chi_so} có quá nhiều dữ liệu ({pts_count} điểm). Hệ thống tự động gộp trung bình theo '{'Ngày' if rule=='1D' else 'Giờ'}' để mượt mà hơn.")
                                     plot_data = sub_df.set_index('TG').resample(rule)['Giá trị'].mean().dropna().reset_index()
                                 else: 
                                     plot_data = sub_df.groupby('TG')['Giá trị'].mean().reset_index()
@@ -335,20 +339,17 @@ if uploaded_file is not None:
                                 st.write("---")
                         else: st.info("Không có dữ liệu hợp lệ.")
 
-        # ==========================================
-        # TAB 3: BIỂU ĐỒ LỒNG NHAU 
-        # ==========================================
         with tab3:
             st.write("⚙️ Thiết lập biểu đồ lồng nhau")
             col1_m, col2_m = st.columns([1, 2])
             with col1_m:
-                st.write("🎯 **Chọn chỉ số:**")
+                st.write("🎯 **Chọn chỉ số đối chiếu:**")
                 check_multi_ui = st.columns(3)
                 selected_keys_3 = [k for i, k in enumerate(numeric_options) if check_multi_ui[i % 3].checkbox(k.upper(), key=f"c_multi_{k}")]
 
             with col2_m:
                 start_d_3, end_d_3 = render_date_filter(min_d, max_d, "tab3")
-                filter_data_3 = st.checkbox("✅ Lọc Sạch Dữ Liệu (Bỏ nhiễu)", value=True, key="filter_tab3")
+                filter_data_3 = st.checkbox("✅ Lọc Sạch Dữ Liệu (Bỏ nhiễu theo ngưỡng an toàn)", value=True, key="filter_tab3")
 
             if st.button("🚀 TẠO BIỂU ĐỒ ĐỐI CHIẾU", type="primary", key="btn_multi"):
                 if len(selected_keys_3) < 2: st.warning("Hãy chọn ít nhất 2 chỉ số!")
