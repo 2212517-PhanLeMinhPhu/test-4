@@ -4,12 +4,12 @@ import numpy as np
 import json
 import re
 import plotly.express as px
-import requests  # Sử dụng để thực hiện lệnh gửi dữ liệu (POST) tới Discord
+import requests
 
 # ==============================================================================
 # --- CẤU HÌNH TRANG & THÔNG SỐ TỐI ƯU ---
 # ==============================================================================
-st.set_page_config(page_title="🌱 JSON Data Pro (Discord Alert)", layout="wide", page_icon="🌱")
+st.set_page_config(page_title="🌱 JSON Data Pro (Calibration Mode)", layout="wide", page_icon="🌱")
 st.title("🌱 Công cụ Phân tích Dữ liệu Nông Nghiệp & Áp Suất VPD")
 
 KHOANG_TOI_UU = {
@@ -38,13 +38,9 @@ PATTERN_NUMBER = re.compile(r'[-+]?\d*\.?\d+')
 def send_discord_alert(webhook_url, message):
     if not webhook_url:
         return False
-    # Định dạng payload chuẩn của hệ thống Discord
-    payload = {
-        "content": message
-    }
+    payload = {"content": message}
     try:
         response = requests.post(webhook_url, json=payload, timeout=5)
-        # Discord trả về status code 204 (No Content) khi gửi Webhook thành công
         return response.status_code in [200, 204]
     except Exception:
         return False
@@ -89,7 +85,7 @@ def load_and_process_data(file_bytes):
     return df, time_col
 
 # ==============================================================================
-# 2. CÁC HÀM TIỆN ÍCH CHO BIỂU ĐỒ & BỘ LỌC
+# 2. CÁC HÀM TIỆN ÍCH CHO BIỂU ĐỒ & BỘ LỌC (ĐÃ TÍCH HỢP SAI SỐ HỆ SỐ)
 # ==============================================================================
 def render_date_filter(min_date, max_date, key_prefix):
     if not min_date: return None, None
@@ -110,7 +106,7 @@ def render_date_filter(min_date, max_date, key_prefix):
     return start_d, end_d
 
 @st.cache_data(show_spinner=False)
-def extract_sensor_data(df, selected_cols):
+def extract_sensor_data(df, selected_cols, calib_temp=1.0, calib_humi=1.0):
     has_vpd = any(c.upper() == 'VPD' for c in selected_cols)
     cols_to_run = list(selected_cols)
     if has_vpd:
@@ -135,7 +131,13 @@ def extract_sensor_data(df, selected_cols):
             def process_val(v_str):
                 v = float(v_str)
                 if col_upper in ['PH', 'TBPH'] and v > 14: return v / 100.0
-                if col_upper in ['NHIỆT ĐỘ', 'TEMPKK'] and v > 100: return v / 10.0
+                if col_upper in ['NHIỆT ĐỘ', 'TEMPKK'] and v > 100: v = v / 10.0
+                
+                # --- THỰC HIỆN ĐIỀU CHỈNH SAI SỐ TỰ ĐỘNG TỪ 0.5 ĐẾN 1.5 ---
+                if col_upper in ['NHIỆT ĐỘ', 'TEMPKK']:
+                    v = v * calib_temp
+                elif col_upper in ['ĐỘ ẨM', 'HUMIKK']:
+                    v = v * calib_humi
                 return v
                 
             matches = PATTERN_DATETIME.findall(val)
@@ -182,17 +184,19 @@ def generate_chart(df, title, is_multi=False):
     return fig, num_points
 
 # ==============================================================================
-# 3. GIAO DIỆN CHÍNH INTERFACE
+# 3. GIAO DIỆN CHÍNH
 # ==============================================================================
 uploaded_file = st.file_uploader("📥 Bước 1: Hãy tải lên tệp tin dữ liệu JSON của bạn tại đây:", type=['json'])
 
-# --- SIDEBAR: CẤU HÌNH DISCORD WEBHOOK ---
+# --- SIDEBAR: CÀI ĐẶT DISCORD & BỘ HIỆU CHUẨN SAI SỐ ---
 st.sidebar.markdown("### 📱 CÀI ĐẶT THÔNG BÁO QUA ĐIỆN THOẠI")
-discord_webhook_url = st.sidebar.text_input(
-    "Dán link Discord Webhook tại đây:", 
-    type="password", 
-    placeholder="https://discord.com/api/webhooks/..."
-)
+discord_webhook_url = st.sidebar.text_input("Dán link Discord Webhook tại đây:", type="password", placeholder="https://discord.com/api/webhooks/...")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ⚙️ HIỆU CHUẨN SAI SỐ CẢM BIẾN")
+st.sidebar.caption("Tự điều chỉnh hệ số nhân từ 0.5 đến 1.5 để bù trừ sai lệch thực tế của đầu đo.")
+calib_t = st.sidebar.slider("Hệ số hiệu chuẩn Nhiệt độ:", min_value=0.5, max_value=1.5, value=1.0, step=0.01, help="Giá trị mới = Giá trị thô * Hệ số")
+calib_rh = st.sidebar.slider("Hệ số hiệu chuẩn Độ ẩm:", min_value=0.5, max_value=1.5, value=1.0, step=0.01, help="Giá trị mới = Giá trị thô * Hệ số")
 
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🗂️ Bảng dữ liệu thô", "📈 Biểu đồ Đơn", "📊 Biểu đồ Lồng nhau", "📊 Bảng tra cứu VPD", "💡 Khuyến Nghị Nhiệt/Ẩm"])
@@ -233,7 +237,6 @@ else:
             valid_ts = df['_parsed_time'].dropna()
             if not valid_ts.empty: min_d, max_d = valid_ts.min().date(), valid_ts.max().date()
 
-        # [Logic xử lý hiển thị Tab 1 -> Tab 4 giữ nguyên]
         with tab1:
             st.subheader("🌾 Bảng dữ liệu chi tiết")
             display_df = df.drop(columns=['_parsed_time'], errors='ignore').fillna("")
@@ -249,7 +252,7 @@ else:
             if st.button("🚀 TẠO BIỂU ĐỒ ĐƠN", type="primary"):
                 if selected_keys_2 and start_d_2 and end_d_2:
                     mask = (df['_parsed_time'].dt.date >= start_d_2) & (df['_parsed_time'].dt.date <= end_d_2)
-                    chart_df = extract_sensor_data(df[mask], selected_keys_2)
+                    chart_df = extract_sensor_data(df[mask], selected_keys_2, calib_temp=calib_t, calib_humi=calib_rh)
                     for col in selected_keys_2:
                         sub_df = chart_df[chart_df['Chỉ số'] == col.upper()]
                         if filter_data_2 and col.upper() in KHOANG_TOI_UU:
@@ -267,7 +270,7 @@ else:
             if st.button("🚀 TẠO BIỂU ĐỒ ĐỐI CHIẾU", type="primary"):
                 if len(selected_keys_3) >= 2 and start_d_3 and end_d_3:
                     mask = (df['_parsed_time'].dt.date >= start_d_3) & (df['_parsed_time'].dt.date <= end_d_3)
-                    multi_chart_df = extract_sensor_data(df[mask], selected_keys_3)
+                    multi_chart_df = extract_sensor_data(df[mask], selected_keys_3, calib_temp=calib_t, calib_humi=calib_rh)
                     clean_dfs = []
                     for col in selected_keys_3:
                         sub_df = multi_chart_df[multi_chart_df['Chỉ số'] == col.upper()]
@@ -288,7 +291,7 @@ else:
                 with col_t2: st.info("💡 Chỉ số áp suất VPD lý tưởng từ **0.4 kPa đến 1.6 kPa**.")
                 if start_d_4 and end_d_4:
                     mask_4 = (df['_parsed_time'].dt.date >= start_d_4) & (df['_parsed_time'].dt.date <= end_d_4)
-                    raw_extracted = extract_sensor_data(df[mask_4], ['VPD'])
+                    raw_extracted = extract_sensor_data(df[mask_4], ['VPD'], calib_temp=calib_t, calib_humi=calib_rh)
                     vpd_only = raw_extracted[raw_extracted['Chỉ số'] == 'VPD'].copy()
                     if not vpd_only.empty:
                         vpd_only['Ngày'] = vpd_only['TG'].dt.strftime('%d/%m/%Y')
@@ -297,9 +300,6 @@ else:
                         if filter_data_4: vpd_only = vpd_only[(vpd_only['Áp suất VPD (kPa)'] >= 0.4) & (vpd_only['Áp suất VPD (kPa)'] <= 1.6)]
                         st.dataframe(vpd_only[['Ngày', 'Giờ', 'Áp suất VPD (kPa)']].reset_index(drop=True), use_container_width=True)
 
-        # ==============================================================================
-        # TAB 5: KHUYẾN NGHỊ VÀ TỰ ĐỘNG GỬI CẢNH BÁO SANG DISCORD ĐIỆN THOẠI
-        # ==============================================================================
         with tab5:
             st.subheader("💡 Chẩn Đoán & Khuyến Nghị Chỉ Số Môi Trường Phù Hợp")
             
@@ -309,9 +309,11 @@ else:
                 col_sel1, col_sel2 = st.columns([1, 2])
                 with col_sel1: start_d_5, end_d_5 = render_date_filter(min_d, max_d, "tab5")
                 with col_sel2:
-                    st.markdown("""
+                    st.markdown(f"""
                     **Ngưỡng cài đặt an toàn sinh học:**
                     * **Nhiệt độ tối ưu:** `15.0°C` - `32.0°C`  |  **Độ ẩm tối ưu:** `50.0%` - `85.0%`
+                    
+                    *⚙️ Trạng thái hiệu chuẩn hiện tại:* Nhiệt độ x**{calib_t}** | Độ ẩm x**{calib_rh}**
                     """)
 
                 if start_d_5 and end_d_5:
@@ -325,11 +327,12 @@ else:
                     alert_messages = []
 
                     for raw_col, label, unit, low_bound, high_bound in targets:
-                        extracted = extract_sensor_data(active_df, [raw_col])
+                        # Truyền tham số calib vào hàm trích xuất dữ liệu
+                        extracted = extract_sensor_data(active_df, [raw_col], calib_temp=calib_t, calib_humi=calib_rh)
                         extracted_vals = extracted[extracted['Chỉ số'] == raw_col.upper()]['Giá trị']
 
                         if not extracted_vals.empty:
-                            st.markdown(f"### 📊 Phân tích chuyên sâu về: **{label}**")
+                            st.markdown(f"### 📊 Phân tích chuyên sâu về: **{label}** (Đã hiệu chuẩn)")
                             total_pts = len(extracted_vals)
                             avg_val = extracted_vals.mean()
                             max_val = extracted_vals.max()
@@ -343,7 +346,7 @@ else:
                             pct_high = (high_pts / total_pts) * 100
                             pct_normal = (normal_pts / total_pts) * 100
 
-                            st.write(f"Tỷ lệ phân phối trạng thái an toàn ({total_pts} điểm):")
+                            st.write(f"Tỷ lệ phân phối trạng thái an toàn ({total_pts} điểm sau khi bù sai số):")
                             progress_df = pd.DataFrame({
                                 'Trạng thái': ['Quá thấp', 'Phù hợp', 'Quá cao'],
                                 'Tỷ lệ %': [pct_low, pct_normal, pct_high],
@@ -354,27 +357,22 @@ else:
                             fig_bar.update_layout(height=140, showlegend=False, yaxis_title="")
                             st.plotly_chart(fig_bar, use_container_width=True)
 
-                            # Nếu thời gian vượt ngưỡng lỗi > 15%, ghi nhận chuỗi cảnh báo (Sử dụng cú pháp chữ đậm ** của Discord)
                             if pct_high > 15.0:
-                                alert_messages.append(f"⚠️ **CẢNH BÁO {label.upper()} CAO**:\nChiếm {pct_high:.1f}% tổng thời gian đo đạc vượt ngưỡng! (Cao nhất: {max_val:.1f}{unit})")
+                                alert_messages.append(f"⚠️ **CẢNH BÁO {label.upper()} CAO**:\nChiếm {pct_high:.1f}% tổng thời gian đo đạc vượt ngưỡng! (Cao nhất sau hiệu chuẩn: {max_val:.1f}{unit})")
                             if pct_low > 15.0:
-                                alert_messages.append(f"⚠️ **CẢNH BÁO {label.upper()} THẤP**:\nChiếm {pct_low:.1f}% tổng thời gian đo đạc tụt sâu! (Thấp nhất: {min_val:.1f}{unit})")
+                                alert_messages.append(f"⚠️ **CẢNH BÁO {label.upper()} THẤP**:\nChiếm {pct_low:.1f}% tổng thời gian đo đạc tụt sâu! (Thấp nhất sau hiệu chuẩn: {min_val:.1f}{unit})")
 
-                    # --- GỬI TIN NHẮN ĐẨY VỀ DISCORD ---
                     st.markdown("### 🔔 Trạng thái thông báo từ xa")
                     if discord_webhook_url:
                         if alert_messages:
-                            full_alert_text = "🚨 **HỆ THỐNG GIÁM SÁT VƯỜN THÔNG BÁO KHẨN CẤP** 🚨\n\n" + "\n\n".join(alert_messages) + "\n\n_*Vui lòng mở máy điều hòa / hệ thống tưới hoặc kiểm tra nhà màng ngay!_"
-                            
+                            full_alert_text = "🚨 **HỆ THỐNG GIÁM SÁT VƯỜN THÔNG BÁO (ĐÃ HIỆU CHUẨN SAI SỐ)** 🚨\n\n" + "\n\n".join(alert_messages) + f"\n\n_*Lưu ý: Chỉ số dựa trên cấu hình hiệu chuẩn hệ số T: {calib_t}, RH: {calib_rh}_"
                             success = send_discord_alert(discord_webhook_url, full_alert_text)
-                            if success:
-                                st.success("📱 [DISCORD] Đã bắn thông báo lỗi môi trường vượt dải an toàn về kênh Discord trên điện thoại của bạn!")
-                            else:
-                                st.error("❌ Không thể kết nối với Discord Webhook. Vui lòng kiểm tra lại tính chính xác của đường dẫn.")
+                            if success: st.success("📱 [DISCORD] Đã bắn thông báo hiệu chuẩn lỗi môi trường về điện thoại!")
+                            else: st.error("❌ Không thể kết nối với Discord Webhook.")
                         else:
-                            st.success("📱 [DISCORD] Các thông số hiện tại đều nằm trong ngưỡng sinh học lý tưởng. Không kích hoạt còi báo.")
+                            st.success("📱 [DISCORD] Sau khi bù sai số, các thông số đều nằm trong dải an toàn ổn định.")
                     else:
-                        st.info("💡 Bạn chưa điền đường dẫn Discord Webhook ở thanh bên trái (Sidebar). Hãy điền link vào để kích hoạt tính năng thông báo.")
+                        st.info("💡 Điền link Discord Webhook ở bên trái để kích hoạt thông báo.")
 
     except Exception as e:
         st.error(f"Đã xảy ra lỗi hệ thống: {e}")
